@@ -1,0 +1,157 @@
+------------------------------------------------------------------------------------------------------------------------
+/*AESOPS-2
+*GOAL: 
+get sample of patients 
+with active schedule II-IV Rx within 2 yrs of 02/06/23
+--8,631 patients 
+--27,515 prescriptions 
+
+EXCLUSIONS:
+1. Cancer diagnosis at any time 
+2. Death 
+3. < 18 years old 
+4. Non-sent orders (e.g, cancelled, historical)
+
+QUESTIONS:
+1. Start date vs. pat_enc_date/contact date vs. ordering date?
+	 Answer:start date
+2. Which variables for active rx?
+    Answer:
+	1. start date within 2 yrs.
+	2. Order status = sent
+	3. unsigned: PEND_REF_REAS_C is null
+3. Flat file, or more than 1 rx and/ or address per patient? 
+   Answer:
+   1. more than one rx
+4. All diagnoses (e.g., trauma, neurological) or just cancer? Time constraint?
+   Answer:
+   1. just cancer, at any point.
+7. Age cut off? Current max is 108.
+   Answer:
+   1. No*/
+
+--------------------------------------------------------------------------------------------------------------
+
+--Select patients and providers (> 17 yrs) with opioid rx <= 2 yrs from 02/06/23
+With CTEA AS
+
+--Step 2: create indicator variables for exclusionary criteria and bad data 
+(select t.*, 
+
+--non-numeric (bad) address flag
+case
+when add_line_1 like '[0-9]%' or add_line_1 like 'PO%' or add_line_1 like 'P %' or add_line_1 like 'P.%' then 0
+else 1
+end as bad_add_flg,
+
+--cancer diagnosis flag
+case
+when pat_cancer is null then 0
+else 1
+end as cancer_flg,
+
+--death flag
+case
+when DEATH_DATE is not null then 1
+else 0
+end as death_flg,
+
+--out of state flag
+case
+when state_name != 'California' then 0
+else 1
+end as out_of_state_flg,
+
+--bad number flag
+case 
+when HOME_PHONE IS NULL OR
+HOME_PHONE like '%000-000%' OR
+HOME_PHONE like '%999-999-9999%' then 1
+else 0
+end as bad_phone_flg,
+
+--bad name flag
+case 
+when PAT_LAST_NAME = 'Zzztest' THEN 1
+ELSE 0
+END AS bad_name_flg
+
+from 
+
+--Step 1: get sample, patient identifiers and medication info.
+(select t.PAT_ID, 
+l.PAT_FIRST_NAME,
+l.PAT_MIDDLE_NAME,
+l.PAT_LAST_NAME,
+l.PAT_MRN_ID AS MRN,
+t.PAT_ENC_CSN_ID,
+t.MEDICATION_ID, 
+t.DESCRIPTION,
+t.START_DATE, 
+d.NAME as DISCON_RSN,
+os.NAME AS ORDER_STATUS,
+oc.ORDER_CLASS_DESC as ORDER_CLASS,
+datediff(DAY, t.start_date, CURRENT_TIMESTAMP) as RX_CD_DIFF,
+l.ADD_LINE_1, 
+l.ADD_LINE_2, 
+zs.NAME as STATE_NAME, 
+l.ZIP, 
+l.CITY,
+z.NAME as COUNTY_NAME, 
+z.ABBR as COUNTY_ABBR, 
+l.BIRTH_DATE, 
+l.HOME_PHONE, 
+l.PAT_MRN_ID, 
+l.DEATH_DATE,
+datediff(YEAR, l.BIRTH_DATE, CURRENT_TIMESTAMP) as AGE, 
+n.VISIT_PROV_ID, 
+p.pat_id as PAT_CANCER
+
+from AltaMed_audit.dbo.all_schedule_rxs t
+left join 
+AltaMed_src_aug_2022.dbo.PATIENT l
+on t.PAT_ID = l.PAT_ID
+left join 
+AltaMed_src_aug_2022.dbo.PAT_ENC n
+on t.pat_enc_csn_id = n.PAT_ENC_CSN_ID
+left join 
+(select distinct pat_id from AltaMed_audit.dbo.exclude_dxs) p
+on t.pat_id = p.pat_id
+left join 
+AltaMed_src_aug_2022.dbo.ZC_COUNTY z 
+on l.COUNTY_C = z.COUNTY_C
+left join 
+AltaMed_src_aug_2022.dbo.ZC_STATE zs
+on l.STATE_C = zs.STATE_C
+left join 
+AltaMed_src_aug_2022.dbo.ZC_ORDER_STATUS os
+on t.ORDER_STATUS_C = os.ORDER_STATUS_C
+left join 
+AltaMed_audit.dbo.zc_order_class oc
+on t.ORDER_CLASS_C = oc.ORDER_CLASS_C
+left join 
+AltaMed_src_aug_2022.dbo.ZC_RSN_FOR_DISCON d
+on d.RSN_FOR_DISCON_C = t.RSN_FOR_DISCON_C
+
+--18 years or older at the time of the RX
+where (datediff(YEAR, l.BIRTH_DATE, '2021/02/06')) > 17
+
+--rx within 2 yrs of 02/06/23
+and (datediff(DAY, t.start_date, '2023/02/06')) < 730
+
+--only sent orders (non-cancelled, historical, etc.)
+and t.order_status_c = 2
+)
+--End step 1 
+t)
+--End step 2
+--Select variables for file and exclude patients who died or were diagnosed with cancer 
+SELECT PAT_ID, PAT_FIRST_NAME,PAT_MIDDLE_NAME, PAT_LAST_NAME, HOME_PHONE,
+ADD_LINE_1, ADD_LINE_2,ZIP, CITY, COUNTY_NAME, COUNTY_ABBR, STATE_NAME, BIRTH_DATE, AGE,
+MRN, PAT_ENC_CSN_ID, VISIT_PROV_ID, MEDICATION_ID,
+DESCRIPTION, START_DATE, RX_CD_DIFF, DISCON_RSN, ORDER_CLASS, ORDER_STATUS, 
+BAD_PHONE_FLG, BAD_ADD_FLG, BAD_NAME_FLG, OUT_OF_STATE_FLG
+INTO AltaMed_audit.dbo.AESOPS2_FINAL_SAMPLE_v2 FROM
+CTEA where cancer_flg = 0 and death_flg = 0
+
+
